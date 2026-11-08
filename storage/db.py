@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS receipt_queue (
     status          TEXT NOT NULL DEFAULT 'pending',
     receipt_uuid    TEXT,
     receipt_url     TEXT,
+    receipt_name    TEXT,
     error_message   TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     sent_at         TEXT,
@@ -89,10 +90,19 @@ def init_db(db_path: str | Path | None = None) -> None:
     conn = get_connection(path)
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()
     logger.info("БД инициализирована: %s", path)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Лёгкие миграции для баз, созданных старыми версиями."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(receipt_queue)")}
+    if "receipt_name" not in columns:
+        conn.execute("ALTER TABLE receipt_queue ADD COLUMN receipt_name TEXT")
+        logger.info("Миграция БД: добавлена колонка receipt_queue.receipt_name")
 
 
 def backup_db(
@@ -391,6 +401,7 @@ def list_queue(
                q.status        AS status,
                q.receipt_uuid  AS receipt_uuid,
                q.receipt_url   AS receipt_url,
+               q.receipt_name  AS receipt_name,
                q.error_message AS error_message,
                q.created_at    AS created_at,
                q.sent_at       AS sent_at,
@@ -417,15 +428,17 @@ def mark_receipt_sent(
     income_id: int,
     receipt_uuid: str,
     receipt_url: str | None = None,
+    receipt_name: str | None = None,
     db_path: str | Path | None = None,
 ) -> None:
     conn = get_connection(db_path)
     try:
         conn.execute(
             "UPDATE receipt_queue SET status = 'sent', sent_at = datetime('now'), "
-            "receipt_uuid = ?, receipt_url = ?, error_message = NULL "
+            "receipt_uuid = ?, receipt_url = ?, receipt_name = COALESCE(?, receipt_name), "
+            "error_message = NULL "
             "WHERE income_id = ?",
-            (receipt_uuid, receipt_url, income_id),
+            (receipt_uuid, receipt_url, receipt_name, income_id),
         )
         conn.commit()
     finally:
@@ -482,6 +495,41 @@ def delete_from_queue(
         )
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_from_queue_many(
+    income_ids: list[int],
+    db_path: str | Path | None = None,
+) -> int:
+    """Убирает несколько записей из очереди (pending/error). Возвращает число удалённых."""
+    ids = [int(income_id) for income_id in income_ids]
+    if not ids:
+        return 0
+    conn = get_connection(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+        cursor = conn.execute(
+            f"DELETE FROM receipt_queue WHERE income_id IN ({placeholders}) "
+            "AND status IN ('pending', 'error')",
+            ids,
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def receipt_statuses(db_path: str | Path | None = None) -> dict[str, str]:
+    """Карта external_id -> статус чека ('pending'/'error'/'sent')."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT i.external_id, q.status FROM receipt_queue q "
+            "JOIN incomes i ON i.id = q.income_id"
+        ).fetchall()
+        return {row["external_id"]: row["status"] for row in rows}
     finally:
         conn.close()
 

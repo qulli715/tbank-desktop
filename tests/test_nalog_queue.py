@@ -56,7 +56,7 @@ def test_delete_pending_from_queue(db):
 def test_delete_sent_is_not_allowed(db):
     enqueue_receipts(["op-1"], db)
     income_id = int(list_queue(["pending"], db)[0]["income_id"])
-    mark_receipt_sent(income_id, "receipt-uuid", "https://example/print", db)
+    mark_receipt_sent(income_id, "receipt-uuid", "https://example/print", db_path=db)
 
     assert delete_from_queue(income_id, db) is False
     assert len(list_queue(["sent"], db)) == 1

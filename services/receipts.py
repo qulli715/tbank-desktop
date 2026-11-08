@@ -16,7 +16,13 @@ from core.nalog import (
     send_receipts,
     verify_sms,
 )
-from storage.db import delete_from_queue, enqueue_receipts, list_queue
+from storage.db import (
+    delete_from_queue,
+    delete_from_queue_many,
+    enqueue_receipts,
+    list_queue,
+    receipt_statuses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +113,16 @@ def remove_from_queue(income_id: int, db_path=None) -> bool:
     return delete_from_queue(income_id, db_path=db_path)
 
 
+def remove_many_from_queue(income_ids: list[int], db_path=None) -> int:
+    """Убирает несколько чеков из очереди; возвращает число удалённых."""
+    return delete_from_queue_many(income_ids, db_path=db_path)
+
+
+def statuses(db_path=None) -> dict[str, str]:
+    """Карта external_id -> статус чека (для сверки в аналитике)."""
+    return receipt_statuses(db_path=db_path)
+
+
 def queue() -> list[dict]:
     return list_queue(list(QUEUE_STATUSES))
 
@@ -171,12 +187,16 @@ def logout() -> None:
 # --------------------------------------------------------------------------- #
 # Отправка
 # --------------------------------------------------------------------------- #
-def send(only_failed: bool, on_progress: ProgressFn | None = None) -> list[dict]:
+def send(
+    only_failed: bool,
+    on_progress: ProgressFn | None = None,
+    receipt_name: str | None = None,
+) -> list[dict]:
     """Отправляет чеки в ФНС. Клиент создаётся внутри вызывающего потока."""
     client = get_nalog_client()
     try:
         if only_failed:
-            return retry_failed(client, on_progress=on_progress)
-        return send_receipts(client, on_progress=on_progress)
+            return retry_failed(client, on_progress=on_progress, receipt_name=receipt_name)
+        return send_receipts(client, on_progress=on_progress, receipt_name=receipt_name)
     finally:
         client.close()

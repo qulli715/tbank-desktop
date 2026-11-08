@@ -1,4 +1,5 @@
-# ui/analytics_view.py — экран «Аналитика»: фильтры, метрики, графики, treemap, таблица.
+# ui/analytics_view.py — экран «Аналитика»: фильтры, метрики, сводка, графики, treemap,
+# таблица с прямоугольным выделением, массовыми действиями и экспортом.
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -28,11 +30,20 @@ from core.analytics import (
     compute_metrics,
     filter_incomes,
     format_rub,
+    format_rub_exact,
     group_by_day,
     group_by_source,
     matches_income_query,
 )
 from core.models import Income
+from core.summary import (
+    current_year,
+    npd_progress,
+    receipt_label,
+    receipt_summary,
+    tax_estimate_rub,
+    year_total_rub,
+)
 from core.treemap import (
     DEFAULT_MAX_SOURCES,
     HIERARCHY_SOURCE,
@@ -43,6 +54,7 @@ from core.treemap import (
     build_treemap,
 )
 from services import receipts as receipts_service
+from services.settings import Settings
 from services.state import AppState
 from storage.db import list_incomes, set_hidden
 from ui.widgets.charts import LineChartWidget, PieChartWidget, TreemapWidget
@@ -51,16 +63,18 @@ from ui.widgets.metrics import MetricsRow
 
 
 class AnalyticsView(QWidget):
-    """Главный экран: фильтры слева, метрики, графики, treemap и таблица справа."""
+    """Главный экран: фильтры слева, метрики/сводка/графики/таблица справа."""
 
     dataChanged = Signal()
     importRequested = Signal()
     receiptsTransferred = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.settings = settings
         self.state = AppState()
         self._all: list[Income] = []
+        self._statuses: dict[str, str] = {}
         self.model: IncomeTableModel | None = None
         self._build_ui()
         self.reload()
@@ -88,31 +102,32 @@ class AnalyticsView(QWidget):
             spin.setSuffix(" ₽")
 
         self.hide_rows_check = QCheckBox("Скрывать строки полностью")
+        self.without_receipt_check = QCheckBox("Только без чека")
 
+        self.import_button = QPushButton("Импорт CSV…")
+        self.import_button.setToolTip("Загрузить выписку Т-Банка (Ctrl+O)")
         self.reset_button = QPushButton("Сбросить фильтры")
         self.reload_button = QPushButton("Обновить")
         self.reload_button.setToolTip("Перечитать данные из БД (F5)")
-        self.import_button = QPushButton("Импорт CSV…")
-        self.import_button.setToolTip("Загрузить выписку Т-Банка (Ctrl+O)")
 
         form.addRow("Период с", self.date_from)
         form.addRow("по", self.date_to)
         form.addRow("Сумма от", self.amount_from)
         form.addRow("до", self.amount_to)
         form.addRow(self.hide_rows_check)
+        form.addRow(self.without_receipt_check)
         form.addRow(self.import_button)
         form.addRow(self.reset_button)
         form.addRow(self.reload_button)
-
         filters_hint = QLabel(
             "Скрытые пополнения не влияют на метрики.\n"
-            "«Выбрать» — для переноса в «Мой налог»."
+            "Протяни мышью по таблице — прямоугольное выделение."
         )
         filters_hint.setWordWrap(True)
         filters_hint.setObjectName("hint")
         form.addRow(filters_hint)
 
-        # --- правая часть: метрики сверху ---
+        # --- правая часть ---
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -121,7 +136,8 @@ class AnalyticsView(QWidget):
         self.metrics = MetricsRow()
         right_layout.addWidget(self.metrics)
 
-        # --- графики ---
+        right_layout.addWidget(self._build_summary_strip())
+
         charts = QWidget()
         charts_layout = QVBoxLayout(charts)
         charts_layout.setContentsMargins(0, 0, 0, 0)
@@ -131,45 +147,16 @@ class AnalyticsView(QWidget):
         charts_row.setSpacing(10)
         self.line_chart = LineChartWidget()
         self.pie_chart = PieChartWidget()
-        charts_row.addWidget(self._titled("Поступления по дням", self.line_chart), 1)
-        charts_row.addWidget(self._titled("Источники", self.pie_chart), 1)
+        self._line_box = self._titled("Поступления по дням", self.line_chart)
+        self._pie_box = self._titled("Источники", self.pie_chart)
+        charts_row.addWidget(self._line_box, 1)
+        charts_row.addWidget(self._pie_box, 1)
         charts_layout.addLayout(charts_row)
 
-        # контролы treemap
-        controls = QHBoxLayout()
-        controls.setSpacing(6)
-        controls.addWidget(QLabel("Метрика"))
-        self.metric_combo = QComboBox()
-        self.metric_combo.addItems(["Сумма", "Средний чек"])
-        controls.addWidget(self.metric_combo)
+        self.treemap_block = self._build_treemap_block()
+        charts_layout.addWidget(self.treemap_block, 1)
 
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Иерархия"))
-        self.hierarchy_combo = QComboBox()
-        self.hierarchy_combo.addItems(["По источникам", "Источник → день"])
-        controls.addWidget(self.hierarchy_combo)
-
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Мин. сумма источника"))
-        self.threshold_spin = QDoubleSpinBox()
-        self.threshold_spin.setRange(0, 10_000_000)
-        self.threshold_spin.setSingleStep(100)
-        self.threshold_spin.setDecimals(0)
-        self.threshold_spin.setValue(500)
-        self.threshold_spin.setSuffix(" ₽")
-        controls.addWidget(self.threshold_spin)
-
-        controls.addStretch(1)
-        charts_layout.addLayout(controls)
-
-        self.treemap = TreemapWidget()
-        charts_layout.addWidget(self.treemap, 1)
-
-        self.treemap_info = QLabel("—")
-        self.treemap_info.setObjectName("hint")
-        charts_layout.addWidget(self.treemap_info)
-
-        # --- нижняя часть: таблица ---
+        # --- нижняя часть ---
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
@@ -177,13 +164,24 @@ class AnalyticsView(QWidget):
 
         toolbar = QHBoxLayout()
         self.selection_label = QLabel("Выбрано: 0")
+        self.mark_selected_button = QPushButton("Отметить выделенные")
+        self.unmark_selected_button = QPushButton("Снять отметку")
+        self.hide_selected_button = QPushButton("Скрыть выделенные")
         self.select_all_button = QPushButton("Выбрать все")
         self.clear_selection_button = QPushButton("Снять выбор")
         self.transfer_button = QPushButton("Перенести в «Мой налог»")
+        for button in (
+            self.mark_selected_button,
+            self.unmark_selected_button,
+            self.hide_selected_button,
+        ):
+            button.setEnabled(False)
         self.transfer_button.setEnabled(False)
-        self.transfer_button.setToolTip("Поставить отмеченные поступления в очередь чеков")
         toolbar.addWidget(self.selection_label)
         toolbar.addStretch(1)
+        toolbar.addWidget(self.mark_selected_button)
+        toolbar.addWidget(self.unmark_selected_button)
+        toolbar.addWidget(self.hide_selected_button)
         toolbar.addWidget(self.select_all_button)
         toolbar.addWidget(self.clear_selection_button)
         toolbar.addWidget(self.transfer_button)
@@ -209,7 +207,6 @@ class AnalyticsView(QWidget):
         self.table = table
         self.model = model
         bottom_layout.addWidget(table, 1)
-
         self.status_label = QLabel("—")
         self.status_label.setObjectName("hint")
         bottom_layout.addWidget(self.status_label)
@@ -220,7 +217,7 @@ class AnalyticsView(QWidget):
         inner.addWidget(bottom)
         inner.setStretchFactor(0, 0)
         inner.setStretchFactor(1, 1)
-        inner.setSizes([420, 360])
+        inner.setSizes([400, 400])
         right_layout.addWidget(inner, 1)
 
         root = QSplitter(Qt.Horizontal)
@@ -241,14 +238,19 @@ class AnalyticsView(QWidget):
         for spin in (self.amount_from, self.amount_to):
             spin.valueChanged.connect(self._apply_filters)
         self.hide_rows_check.toggled.connect(self._apply_filters)
+        self.without_receipt_check.toggled.connect(self._apply_filters)
         self.reset_button.clicked.connect(self._reset_filters)
         self.reload_button.clicked.connect(self.reload)
         self.import_button.clicked.connect(self.importRequested)
         self.select_all_button.clicked.connect(self._select_all)
         self.clear_selection_button.clicked.connect(self._clear_selection)
+        self.mark_selected_button.clicked.connect(self._mark_selected)
+        self.unmark_selected_button.clicked.connect(self._unmark_selected)
+        self.hide_selected_button.clicked.connect(self._hide_selected)
         self.transfer_button.clicked.connect(self._transfer_selected)
         self.model.selectToggled.connect(self._on_select_toggled)
         self.model.hiddenToggled.connect(self._on_hidden_toggled)
+        self.table.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
 
         self.metric_combo.currentIndexChanged.connect(self._on_metric_changed)
         self.hierarchy_combo.currentIndexChanged.connect(self._apply_filters)
@@ -256,6 +258,75 @@ class AnalyticsView(QWidget):
         self.treemap.sourceClicked.connect(self._on_source_clicked)
         self.reset_source_button.clicked.connect(lambda: self._on_source_clicked(None))
         self.search_edit.textChanged.connect(lambda _text: self._apply_filters())
+
+        self.apply_settings(self.settings)
+
+    def _build_summary_strip(self) -> QWidget:
+        strip = QWidget()
+        strip.setObjectName("summaryStrip")
+        layout = QHBoxLayout(strip)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(18)
+
+        self.sum_income = QLabel("Доход: —")
+        self.sum_income.setObjectName("summaryValue")
+        self.sum_tax = QLabel("Налог: —")
+        self.sum_tax.setObjectName("summaryValue")
+        self.sum_missing = QLabel("Без чека: —")
+        self.sum_missing.setObjectName("summaryValue")
+        self.sum_checks = QLabel("Чеки: —")
+        self.limit_bar = QProgressBar()
+        self.limit_bar.setRange(0, 100)
+        self.limit_bar.setValue(0)
+        self.limit_bar.setFixedWidth(170)
+        self.limit_bar.setTextVisible(True)
+        self.limit_bar.setFormat("НПД: —")
+
+        layout.addWidget(self.sum_income)
+        layout.addWidget(self.sum_tax)
+        layout.addWidget(self.sum_missing)
+        layout.addWidget(self.sum_checks)
+        layout.addStretch(1)
+        layout.addWidget(self.limit_bar)
+        return strip
+
+    def _build_treemap_block(self) -> QWidget:
+        block = QWidget()
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+        controls_layout.addWidget(QLabel("Метрика"))
+        self.metric_combo = QComboBox()
+        self.metric_combo.addItems(["Сумма", "Средний чек"])
+        controls_layout.addWidget(self.metric_combo)
+        controls_layout.addSpacing(10)
+        controls_layout.addWidget(QLabel("Иерархия"))
+        self.hierarchy_combo = QComboBox()
+        self.hierarchy_combo.addItems(["По источникам", "Источник → день"])
+        controls_layout.addWidget(self.hierarchy_combo)
+        controls_layout.addSpacing(10)
+        controls_layout.addWidget(QLabel("Мин. сумма источника"))
+        self.threshold_spin = QDoubleSpinBox()
+        self.threshold_spin.setRange(0, 10_000_000)
+        self.threshold_spin.setSingleStep(100)
+        self.threshold_spin.setDecimals(0)
+        self.threshold_spin.setValue(500)
+        self.threshold_spin.setSuffix(" ₽")
+        controls_layout.addWidget(self.threshold_spin)
+        controls_layout.addStretch(1)
+        layout.addWidget(controls)
+
+        self.treemap = TreemapWidget()
+        layout.addWidget(self.treemap, 1)
+        self.treemap_info = QLabel("—")
+        self.treemap_info.setObjectName("hint")
+        layout.addWidget(self.treemap_info)
+        return block
 
     @staticmethod
     def _titled(title: str, widget: QWidget) -> QWidget:
@@ -273,8 +344,12 @@ class AnalyticsView(QWidget):
 
     # --------------------------------------------------------------- данные
     def reload(self) -> None:
-        """Перечитывает все пополнения из БД и обновляет экран."""
+        """Перечитывает пополнения и статусы чеков из БД."""
         self._all = list_incomes(include_hidden=True)
+        try:
+            self._statuses = receipts_service.statuses()
+        except Exception:  # noqa: BLE001
+            self._statuses = {}
         self._update_bounds()
         self._apply_filters()
 
@@ -319,15 +394,18 @@ class AnalyticsView(QWidget):
         )
         visible = [income for income in date_amount if not income.is_hidden]
         hide_rows = self.hide_rows_check.isChecked()
+        only_without_receipt = self.without_receipt_check.isChecked()
         query = self.search_edit.text()
         table_rows = [
             income
             for income in date_amount
             if (not income.is_hidden or not hide_rows)
             and (self.state.source_filter is None or income.source == self.state.source_filter)
+            and (not only_without_receipt or self._statuses.get(income.external_id) != "sent")
             and matches_income_query(income, query)
         ]
 
+        self.model.set_statuses(self._statuses)
         self.model.set_rows(table_rows)
         self.model.set_selected(self.state.selected)
         self.metrics.set_metrics(compute_metrics(visible))
@@ -344,6 +422,7 @@ class AnalyticsView(QWidget):
         self.treemap.set_filter(self.state.source_filter)
         self._update_treemap_info(treemap_data)
         self._update_filter_badge()
+        self._update_summary(visible)
 
         hidden = [income for income in date_amount if income.is_hidden]
         hidden_sum = sum(income.amount_kopecks for income in hidden) / 100
@@ -354,16 +433,30 @@ class AnalyticsView(QWidget):
             f"всего в базе: {len(self._all)}{filter_note}"
         )
         self._update_selection_label()
+        self._on_table_selection_changed()
         self.dataChanged.emit()
 
-    def _update_treemap_info(self, result: TreemapResult) -> None:
-        if self._metric() == METRIC_AVG:
-            metric_note = "средний чек"
-        else:
-            metric_note = "сумма"
-        cap_note = (
-            f" (показаны {DEFAULT_MAX_SOURCES} крупнейших)" if result.capped else ""
+    def _update_summary(self, visible: list[Income]) -> None:
+        summary = receipt_summary(visible, self._statuses)
+        tax = tax_estimate_rub(summary["total_rub"], self.settings.tax_rate)
+        rate_text = f"{self.settings.tax_rate:g}%"
+        self.sum_income.setText(f"Доход: {format_rub(summary['total_rub'])}")
+        self.sum_tax.setText(f"Налог ({rate_text}): {format_rub(tax)}")
+        self.sum_missing.setText(
+            f"Без чека: {summary['none_count']} на {format_rub(summary['none_rub'])}"
         )
+        self.sum_checks.setText(
+            f"Чеки: {summary['sent_count']} / {summary['total_count']} "
+            f"(в очереди: {summary['queued_count']})"
+        )
+        year_total = year_total_rub(self._all, current_year())
+        progress = npd_progress(year_total)
+        self.limit_bar.setValue(min(100, int(round(progress))))
+        self.limit_bar.setFormat(f"НПД: {progress:.1f}%")
+
+    def _update_treemap_info(self, result: TreemapResult) -> None:
+        metric_note = "средний чек" if self._metric() == METRIC_AVG else "сумма"
+        cap_note = f" (показаны {DEFAULT_MAX_SOURCES} крупнейших)" if result.capped else ""
         self.treemap_info.setText(
             f"Показано источников: {result.shown_sources}{cap_note}. "
             f"В «Прочее»: {result.other_sources} "
@@ -398,6 +491,7 @@ class AnalyticsView(QWidget):
         self.amount_from.setValue(0)
         self.amount_from.blockSignals(False)
         self.hide_rows_check.setChecked(False)
+        self.without_receipt_check.setChecked(False)
         self.state.source_filter = None
         self.search_edit.blockSignals(True)
         self.search_edit.clear()
@@ -442,6 +536,51 @@ class AnalyticsView(QWidget):
         self.selection_label.setText(f"Выбрано: {count} на {format_rub(total_kopecks / 100)}")
         self.transfer_button.setEnabled(count > 0)
 
+    # ------------------------------------------ прямоугольное выделение
+    def _selected_incomes(self) -> list[Income]:
+        if self.model is None:
+            return []
+        selection = self.table.selectionModel()
+        if selection is None:
+            return []
+        model_rows = self.model.rows()
+        indexes = sorted(index.row() for index in selection.selectedRows())
+        return [model_rows[index] for index in indexes if 0 <= index < len(model_rows)]
+
+    def _on_table_selection_changed(self, *_args) -> None:
+        has_selection = bool(self._selected_incomes())
+        self.mark_selected_button.setEnabled(has_selection)
+        self.unmark_selected_button.setEnabled(has_selection)
+        self.hide_selected_button.setEnabled(has_selection)
+
+    def _mark_selected(self) -> None:
+        selected = self._selected_incomes()
+        if not selected:
+            return
+        self.state.selected.update(income.external_id for income in selected)
+        if self.model is not None:
+            self.model.set_selected(self.state.selected)
+        self._update_selection_label()
+
+    def _unmark_selected(self) -> None:
+        selected = self._selected_incomes()
+        if not selected:
+            return
+        for income in selected:
+            self.state.selected.discard(income.external_id)
+        if self.model is not None:
+            self.model.set_selected(self.state.selected)
+        self._update_selection_label()
+
+    def _hide_selected(self) -> None:
+        selected = self._selected_incomes()
+        if not selected:
+            return
+        for income in selected:
+            set_hidden(income.external_id, True)
+            income.is_hidden = True
+        self._apply_filters()
+
     def _transfer_selected(self) -> None:
         """Ставит отмеченные поступления в очередь чеков «Мой налог»."""
         if not self.state.selected:
@@ -461,4 +600,33 @@ class AnalyticsView(QWidget):
         if self.model is not None:
             self.model.set_selected(self.state.selected)
         self._update_selection_label()
+        self.reload()
         self.receiptsTransferred.emit()
+
+    # -------------------------------------------------------------- настройки
+    def apply_settings(self, settings: Settings) -> None:
+        self.settings = settings
+        self._line_box.setVisible(settings.show_line_chart)
+        self._pie_box.setVisible(settings.show_pie_chart)
+        self.treemap_block.setVisible(settings.show_treemap)
+        self._apply_filters()
+
+    # ---------------------------------------------------------------- экспорт
+    def export_data(self) -> tuple[list[str], list[list[str]]]:
+        """Заголовки и строки текущей таблицы (для CSV)."""
+        headers = ["Дата", "Сумма, ₽", "Источник", "Описание", "Категория", "Чек"]
+        rows: list[list[str]] = []
+        if self.model is None:
+            return headers, rows
+        for income in self.model.rows():
+            rows.append(
+                [
+                    income.occurred_at.astimezone(MSK).strftime("%d.%m.%Y %H:%M"),
+                    format_rub_exact(income.amount_kopecks / 100),
+                    income.source or "",
+                    income.description or "",
+                    income.category or "",
+                    receipt_label(self._statuses.get(income.external_id)),
+                ]
+            )
+        return headers, rows

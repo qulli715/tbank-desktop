@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from core.analytics import format_rub
 from core.treemap import TreemapNode, TreemapResult
+from ui import theme
 
 PALETTE = [
     "#4f7cff", "#2bb673", "#f2a33c", "#e05c5c", "#8b5cf6",
@@ -17,9 +18,26 @@ PALETTE = [
     "#a855f7", "#64748b",
 ]
 OTHER_COLOR = "#9aa3af"
-TEXT = QColor("#111827")
-MUTED = QColor("#6b7280")
-GRID = QColor("#e8ecf2")
+
+
+def _bg() -> QColor:
+    return QColor(theme.colors()["bg"])
+
+
+def _text() -> QColor:
+    return QColor(theme.colors()["text"])
+
+
+def _muted() -> QColor:
+    return QColor(theme.colors()["muted"])
+
+
+def _grid() -> QColor:
+    return QColor(theme.colors()["border"])
+
+
+def _accent() -> QColor:
+    return QColor(theme.colors()["accent"])
 
 
 def _compact_rub(value: float) -> str:
@@ -35,7 +53,7 @@ class ChartWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAutoFillBackground(False)
 
@@ -43,11 +61,11 @@ class ChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.TextAntialiasing)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), _bg())
         return painter
 
     def _draw_empty(self, painter: QPainter, text: str = "Нет данных") -> None:
-        painter.setPen(QPen(MUTED))
+        painter.setPen(QPen(_muted()))
         painter.drawText(self.rect(), Qt.AlignCenter, text)
 
 
@@ -86,9 +104,9 @@ class LineChartWidget(ChartWidget):
             for step in range(5):
                 ratio = step / 4
                 y = area.bottom() - ratio * area.height()
-                painter.setPen(QPen(GRID, 1))
+                painter.setPen(QPen(_grid(), 1))
                 painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
-                painter.setPen(QPen(MUTED, 1))
+                painter.setPen(QPen(_muted(), 1))
                 painter.drawText(
                     QRectF(0, y - 8, left - 8, 16),
                     Qt.AlignRight | Qt.AlignVCenter,
@@ -117,19 +135,19 @@ class LineChartWidget(ChartWidget):
 
             # линия и точки
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor("#4f7cff"), 2))
+            painter.setPen(QPen(_accent(), 2))
             for index in range(1, count):
                 painter.drawLine(
                     QPointF(x_at(index - 1), y_at(self._points[index - 1]["total_rub"])),
                     QPointF(x_at(index), y_at(self._points[index]["total_rub"])),
                 )
-            painter.setBrush(QBrush(QColor("#ffffff")))
-            painter.setPen(QPen(QColor("#4f7cff"), 2))
+            painter.setBrush(QBrush(_bg()))
+            painter.setPen(QPen(_accent(), 2))
             for index, point in enumerate(self._points):
                 painter.drawEllipse(QPointF(x_at(index), y_at(point["total_rub"])), 3, 3)
 
             # подписи оси X (примерно 6 штук)
-            painter.setPen(QPen(MUTED, 1))
+            painter.setPen(QPen(_muted(), 1))
             step = max(1, count // 6)
             for index in range(0, count, step):
                 label = self._points[index]["date"].strftime("%d.%m")
@@ -187,7 +205,7 @@ class PieChartWidget(ChartWidget):
                 painter.setBrush(QBrush(color))
                 painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(QRectF(legend_x, y + line_height / 2 - 4, 8, 8), 2, 2)
-                painter.setPen(QPen(TEXT, 1))
+                painter.setPen(QPen(_text(), 1))
                 share = item["total_rub"] / total * 100
                 text = f"{item['source']} — {format_rub(item['total_rub'])} ({share:.0f}%)"
                 text = metrics.elidedText(text, Qt.ElideRight, available_width)
@@ -279,7 +297,7 @@ class TreemapWidget(ChartWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(200)
+        self.setMinimumHeight(165)
         self._result: TreemapResult | None = None
         self._rects: list[tuple[QRectF, TreemapNode, str]] = []  # rect, node, source-label
         self._hover_index = -1
@@ -367,7 +385,7 @@ class TreemapWidget(ChartWidget):
 
                 if index == self._hover_index:
                     painter.setBrush(Qt.NoBrush)
-                    painter.setPen(QPen(QColor("#111827"), 2))
+                    painter.setPen(QPen(_text(), 2))
                     painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 3, 3)
 
                 self._draw_label(painter, rect, node)

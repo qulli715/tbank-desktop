@@ -76,12 +76,17 @@ def send_receipts(
     on_progress: Optional[ProgressFn] = None,
     db_path=None,
     only_failed: bool = False,
+    receipt_name: Optional[str] = None,
 ) -> list[dict]:
-    """Создаёт чеки по очереди (pending + error). Ошибка одной записи не рвёт цикл."""
+    """Создаёт чеки по очереди (pending + error). Ошибка одной записи не рвёт цикл.
+
+    receipt_name — наименование услуги в чеке (по умолчанию из конфига).
+    """
     if only_failed:
         for row in list_queue(["error"], db_path=db_path):
             clear_receipt_error(row["income_id"], db_path=db_path)
 
+    name = (receipt_name or "").strip() or config.NALOG_RECEIPT_NAME
     rows = list_queue(["pending", "error"], db_path=db_path)
     results: list[dict] = []
     total = len(rows)
@@ -93,7 +98,7 @@ def send_receipts(
         income_id = row["income_id"]
         try:
             receipt = client.create_receipt(
-                name=config.NALOG_RECEIPT_NAME,
+                name=name,
                 amount=Decimal(row["amount_kopecks"]) / 100,
                 operation_time=_parse_datetime(row["occurred_at"]),
             )
@@ -101,6 +106,7 @@ def send_receipts(
                 income_id,
                 receipt.uuid,
                 getattr(receipt, "print_url", None),
+                receipt_name=name,
                 db_path=db_path,
             )
             results.append({"income_id": income_id, "status": "sent", "error": None})
@@ -126,6 +132,13 @@ def retry_failed(
     client,
     on_progress: Optional[ProgressFn] = None,
     db_path=None,
+    receipt_name: Optional[str] = None,
 ) -> list[dict]:
     """Повторяет только записи со статусом error."""
-    return send_receipts(client, on_progress=on_progress, db_path=db_path, only_failed=True)
+    return send_receipts(
+        client,
+        on_progress=on_progress,
+        db_path=db_path,
+        only_failed=True,
+        receipt_name=receipt_name,
+    )

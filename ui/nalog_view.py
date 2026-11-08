@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -25,9 +26,10 @@ from PySide6.QtWidgets import (
 import config
 from core.analytics import format_rub_exact
 from services import receipts as receipts_service
+from services.settings import Settings
 
 QUEUE_COLUMNS = ("Источник", "Сумма", "Дата поступления", "Описание", "Статус", "Ошибка")
-SENT_COLUMNS = ("Источник", "Сумма", "Дата поступления", "Дата отправки", "Ссылка на чек")
+SENT_COLUMNS = ("Источник", "Сумма", "Дата поступления", "Дата отправки", "Услуга", "Ссылка на чек")
 
 _ERROR_COLOR = QColor("#b91c1c")
 _PENDING_COLOR = QColor("#6b7280")
@@ -56,15 +58,18 @@ class _SendWorker(QThread):
     done = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, only_failed: bool, parent: QWidget | None = None) -> None:
+    def __init__(self, only_failed: bool, receipt_name: str | None = None,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._only_failed = only_failed
+        self._receipt_name = receipt_name
 
     def run(self) -> None:  # noqa: D401
         try:
             results = receipts_service.send(
                 self._only_failed,
                 on_progress=lambda index, total, text: self.progress.emit(index, total, text),
+                receipt_name=self._receipt_name,
             )
             self.done.emit(results)
         except Exception as exc:  # noqa: BLE001
@@ -74,8 +79,9 @@ class _SendWorker(QThread):
 class NalogView(QWidget):
     """Очередь чеков и отправка в ФНС через moy-nalog-api."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.settings = settings
         self._authenticated = False
         self._sending = False
         self._challenge_token: str | None = None
@@ -222,7 +228,7 @@ class NalogView(QWidget):
         table.setHorizontalHeaderLabels(list(columns))
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setAlternatingRowColors(True)
         table.setShowGrid(False)
         table.verticalHeader().setVisible(False)
@@ -233,6 +239,9 @@ class NalogView(QWidget):
         return table
 
     # --------------------------------------------------------------- данные
+    def apply_settings(self, settings: Settings) -> None:
+        self.settings = settings
+
     def refresh(self) -> None:
         """Перечитывает сессию и очередь."""
         try:
@@ -333,11 +342,12 @@ class NalogView(QWidget):
                 format_rub_exact(row["amount_kopecks"] / 100),
                 receipts_service.format_dt(row["occurred_at"]),
                 receipts_service.format_dt(row["sent_at"]),
+                row.get("receipt_name") or "—",
                 row["receipt_url"] or "",
             )
             for column, text in enumerate(values):
                 item = QTableWidgetItem(str(text))
-                if column == 4:
+                if column == 5:
                     item.setForeground(QColor("#1d4ed8"))
                     if row["receipt_url"]:
                         item.setToolTip("Двойной клик — открыть чек в браузере")
@@ -346,46 +356,59 @@ class NalogView(QWidget):
         table.horizontalHeader().setStretchLastSection(True)
 
     # ------------------------------------------------- удаление из очереди
-    def _selected_queue_row(self) -> dict | None:
-        row_index = self.queue_table.currentRow()
-        if row_index < 0 or row_index >= len(self._queue_visible):
-            return None
-        return self._queue_visible[row_index]
+    def _selected_queue_rows(self) -> list[dict]:
+        selection = self.queue_table.selectionModel()
+        if selection is None:
+            return []
+        indexes = sorted(index.row() for index in selection.selectedRows())
+        return [self._queue_visible[i] for i in indexes if 0 <= i < len(self._queue_visible)]
 
     def _refresh_delete_button(self) -> None:
-        row = self._selected_queue_row()
-        allowed = (
-            row is not None
-            and not self._sending
-            and row.get("status") in receipts_service.QUEUE_STATUSES
-        )
-        self.delete_button.setEnabled(bool(allowed))
+        rows = [
+            row
+            for row in self._selected_queue_rows()
+            if row.get("status") in receipts_service.QUEUE_STATUSES
+        ]
+        self.delete_button.setEnabled(bool(rows) and not self._sending)
 
     def _delete_selected(self) -> None:
-        row = self._selected_queue_row()
-        if row is None:
+        rows = [
+            row
+            for row in self._selected_queue_rows()
+            if row.get("status") in receipts_service.QUEUE_STATUSES
+        ]
+        if not rows:
             return
-        amount = format_rub_exact(row["amount_kopecks"] / 100)
+        if len(rows) == 1:
+            row = rows[0]
+            what = (
+                f"чек по «{row['source']}» на "
+                f"{format_rub_exact(row['amount_kopecks'] / 100)}"
+            )
+        else:
+            total = sum(row["amount_kopecks"] for row in rows) / 100
+            what = f"{len(rows)} чек(ов) на {format_rub_exact(total)}"
         if (
             QMessageBox.question(
                 self,
                 "Убрать из очереди",
-                f"Убрать из очереди чек по «{row['source']}» на {amount}?\n\n"
+                f"Убрать из очереди {what}?\n\n"
                 "Поступление останется в базе — чек можно будет создать позже.",
             )
             != QMessageBox.Yes
         ):
             return
+        ids = [int(row["income_id"]) for row in rows]
         try:
-            removed = receipts_service.remove_from_queue(int(row["income_id"]))
+            removed = receipts_service.remove_many_from_queue(ids)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Мой налог", f"Не удалось убрать из очереди: {exc}")
             return
-        if not removed:
+        if removed != len(ids):
             QMessageBox.information(
                 self,
                 "Мой налог",
-                "Запись не найдена или чек уже отправлен — обновите очередь.",
+                "Часть записей не найдена или уже отправлена — очередь обновлена.",
             )
         self.refresh()
 
@@ -474,11 +497,29 @@ class NalogView(QWidget):
         else:
             count = len(self._queue_rows)
             title = f"Создать {count} чеков в ФНС?"
-        if (
+        if count <= 0:
+            return
+
+        presets = list(self.settings.receipt_name_presets) or [self.settings.receipt_name]
+        default_name = self.settings.receipt_name
+        current = presets.index(default_name) if default_name in presets else 0
+        name, accepted = QInputDialog.getItem(
+            self,
+            "Наименование услуги",
+            "Услуга в чеке:",
+            presets,
+            current,
+            True,
+        )
+        if not accepted:
+            return
+        name = (name or "").strip() or default_name
+
+        if self.settings.confirm_before_send and (
             QMessageBox.question(
                 self,
                 "Отправка в ФНС",
-                f"{title}\nНаименование: «{config.NALOG_RECEIPT_NAME}».\n\nПродолжить?",
+                f"{title}\n\nНаименование услуги: «{name}».\n\nПродолжить?",
             )
             != QMessageBox.Yes
         ):
@@ -492,7 +533,7 @@ class NalogView(QWidget):
         self.send_status.setText("Отправляю чеки…")
         self._refresh_buttons()
 
-        worker = _SendWorker(only_failed, self)
+        worker = _SendWorker(only_failed, name, self)
         worker.progress.connect(self._on_send_progress)
         worker.done.connect(self._on_send_done)
         worker.failed.connect(self._on_send_failed)
