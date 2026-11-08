@@ -218,6 +218,9 @@ class AnalyticsView(QWidget):
         inner.setStretchFactor(0, 0)
         inner.setStretchFactor(1, 1)
         inner.setSizes([400, 400])
+        self._charts = charts
+        self._bottom = bottom
+        self._inner = inner
         right_layout.addWidget(inner, 1)
 
         root = QSplitter(Qt.Horizontal)
@@ -609,7 +612,31 @@ class AnalyticsView(QWidget):
         self._line_box.setVisible(settings.show_line_chart)
         self._pie_box.setVisible(settings.show_pie_chart)
         self.treemap_block.setVisible(settings.show_treemap)
+        self._update_charts_layout()
         self._apply_filters()
+
+    def _update_charts_layout(self) -> None:
+        """Скрывает весь блок графиков, если все выключены, и отдаёт место таблице."""
+        show_any = (
+            self.settings.show_line_chart
+            or self.settings.show_pie_chart
+            or self.settings.show_treemap
+        )
+        self._charts.setVisible(show_any)
+        if not show_any:
+            return
+
+        self._charts.updateGeometry()
+        hint = self._charts.sizeHint().height()
+        if hint <= 0:
+            hint = 260
+        hint = min(430, max(200, hint))
+        total = self._inner.height()
+        if total > 0:
+            charts_height = max(1, min(hint, total - 220))
+            self._inner.setSizes([charts_height, max(1, total - charts_height)])
+        else:
+            self._inner.setSizes([hint, 400])
 
     # ---------------------------------------------------------------- экспорт
     def export_data(self) -> tuple[list[str], list[list[str]]]:
