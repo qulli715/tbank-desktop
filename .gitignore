@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Виртуальное окружение
+.venv/
+
+# Сборка (PyInstaller)
+build/
+dist/
+*.spec
+
+# Данные и секреты: БД, бэкапы, логи, сессия ФНС, .env
+data/
+.env
+
+# Логи и архивы
+*.log
+*.zip
+
+# Скриншоты
+*.png
