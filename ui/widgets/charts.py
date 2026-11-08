@@ -53,7 +53,7 @@ class ChartWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(70)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAutoFillBackground(False)
 
@@ -191,16 +191,21 @@ class PieChartWidget(ChartWidget):
                 painter.drawPie(pie_rect, start, -span)
                 start -= span
 
-            # легенда: сжимаем строки, чтобы всё влезло
+            # легенда: сжимаем строки, чтобы всё влезло; лишние сворачиваем в «ещё N»
             legend_x = pie_rect.right() + 14
-            line_height = min(17.0, max(12.0, (self.height() - 10) / max(1, len(self._sources))))
+            count = len(self._sources)
+            line_height = 16.0
+            max_rows = max(1, int((self.height() - 8) // line_height))
+            show_rows = min(count, max_rows)
+            if show_rows < count:
+                show_rows = max(1, show_rows - 1)  # одна строка уйдёт под «ещё N»
             font = QFont(self.font())
             font.setPointSize(8 if line_height >= 15 else 7)
             painter.setFont(font)
             metrics = QFontMetrics(font)
             available_width = max(60, int(self.width() - legend_x - 22))
-            y = max(4.0, (self.height() - line_height * len(self._sources)) / 2)
-            for index, item in enumerate(self._sources):
+            y = max(4.0, (self.height() - line_height * show_rows) / 2)
+            for index, item in enumerate(self._sources[:show_rows]):
                 color = QColor(PALETTE[index % len(PALETTE)])
                 painter.setBrush(QBrush(color))
                 painter.setPen(Qt.NoPen)
@@ -215,6 +220,13 @@ class PieChartWidget(ChartWidget):
                     text,
                 )
                 y += line_height
+            if show_rows < count:
+                painter.setPen(QPen(_muted(), 1))
+                painter.drawText(
+                    QRectF(legend_x + 14, y, available_width, line_height),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    f"…и ещё {count - show_rows}",
+                )
         finally:
             painter.end()
 
@@ -297,7 +309,7 @@ class TreemapWidget(ChartWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(165)
+        self.setMinimumHeight(70)
         self._result: TreemapResult | None = None
         self._rects: list[tuple[QRectF, TreemapNode, str]] = []  # rect, node, source-label
         self._hover_index = -1

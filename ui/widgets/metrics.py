@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from core.analytics import format_rub
 
@@ -25,6 +25,9 @@ class MetricCard(QFrame):
         self.value_label = QLabel("—")
         self.value_label.setObjectName("metricValue")
         self.value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        for label in (self.title_label, self.value_label):
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            label.setMinimumWidth(0)
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)

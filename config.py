@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 if getattr(sys, "frozen", False):  # PyInstaller
     BASE_DIR = Path(sys.executable).resolve().parent

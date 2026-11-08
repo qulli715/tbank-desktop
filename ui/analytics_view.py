@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -162,30 +164,36 @@ class AnalyticsView(QWidget):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(6)
 
-        toolbar = QHBoxLayout()
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.actions_bar = toolbar
         self.selection_label = QLabel("Выбрано: 0")
-        self.mark_selected_button = QPushButton("Отметить выделенные")
-        self.unmark_selected_button = QPushButton("Снять отметку")
-        self.hide_selected_button = QPushButton("Скрыть выделенные")
-        self.select_all_button = QPushButton("Выбрать все")
-        self.clear_selection_button = QPushButton("Снять выбор")
-        self.transfer_button = QPushButton("Перенести в «Мой налог»")
-        for button in (
-            self.mark_selected_button,
-            self.unmark_selected_button,
-            self.hide_selected_button,
-        ):
-            button.setEnabled(False)
-        self.transfer_button.setEnabled(False)
+        self.selection_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.selection_label.setMinimumWidth(0)
         toolbar.addWidget(self.selection_label)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.mark_selected_button)
-        toolbar.addWidget(self.unmark_selected_button)
-        toolbar.addWidget(self.hide_selected_button)
-        toolbar.addWidget(self.select_all_button)
-        toolbar.addWidget(self.clear_selection_button)
-        toolbar.addWidget(self.transfer_button)
-        bottom_layout.addLayout(toolbar)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+        self.mark_selected_action = toolbar.addAction(
+            "Отметить выделенные", self._mark_selected
+        )
+        self.unmark_selected_action = toolbar.addAction("Снять отметку", self._unmark_selected)
+        self.hide_selected_action = toolbar.addAction("Скрыть выделенные", self._hide_selected)
+        self.select_all_action = toolbar.addAction("Выбрать все", self._select_all)
+        self.clear_selection_action = toolbar.addAction("Снять выбор", self._clear_selection)
+        self.transfer_action = toolbar.addAction(
+            "Перенести в «Мой налог»", self._transfer_selected
+        )
+        for action in (
+            self.mark_selected_action,
+            self.unmark_selected_action,
+            self.hide_selected_action,
+            self.transfer_action,
+        ):
+            action.setEnabled(False)
+        bottom_layout.addWidget(toolbar)
 
         search_row = QHBoxLayout()
         self.search_edit = QLineEdit()
@@ -193,6 +201,7 @@ class AnalyticsView(QWidget):
             "Поиск по таблице: имя, сумма, дата, описание, категория…"
         )
         self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(140)
         self.filter_badge = QLabel()
         self.filter_badge.setObjectName("filterBadge")
         self.filter_badge.setVisible(False)
@@ -206,9 +215,12 @@ class AnalyticsView(QWidget):
         table, model = create_table()
         self.table = table
         self.model = model
+        table.setMinimumHeight(40)
         bottom_layout.addWidget(table, 1)
         self.status_label = QLabel("—")
         self.status_label.setObjectName("hint")
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(0)
         bottom_layout.addWidget(self.status_label)
 
         inner = QSplitter(Qt.Vertical)
@@ -245,12 +257,12 @@ class AnalyticsView(QWidget):
         self.reset_button.clicked.connect(self._reset_filters)
         self.reload_button.clicked.connect(self.reload)
         self.import_button.clicked.connect(self.importRequested)
-        self.select_all_button.clicked.connect(self._select_all)
-        self.clear_selection_button.clicked.connect(self._clear_selection)
-        self.mark_selected_button.clicked.connect(self._mark_selected)
-        self.unmark_selected_button.clicked.connect(self._unmark_selected)
-        self.hide_selected_button.clicked.connect(self._hide_selected)
-        self.transfer_button.clicked.connect(self._transfer_selected)
+        self.select_all_action.triggered.connect(self._select_all)
+        self.clear_selection_action.triggered.connect(self._clear_selection)
+        self.mark_selected_action.triggered.connect(self._mark_selected)
+        self.unmark_selected_action.triggered.connect(self._unmark_selected)
+        self.hide_selected_action.triggered.connect(self._hide_selected)
+        self.transfer_action.triggered.connect(self._transfer_selected)
         self.model.selectToggled.connect(self._on_select_toggled)
         self.model.hiddenToggled.connect(self._on_hidden_toggled)
         self.table.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
@@ -271,13 +283,11 @@ class AnalyticsView(QWidget):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(18)
 
-        self.sum_income = QLabel("Доход: —")
-        self.sum_income.setObjectName("summaryValue")
-        self.sum_tax = QLabel("Налог: —")
-        self.sum_tax.setObjectName("summaryValue")
-        self.sum_missing = QLabel("Без чека: —")
-        self.sum_missing.setObjectName("summaryValue")
-        self.sum_checks = QLabel("Чеки: —")
+        self.summary_text = QLabel("Доход: — · Налог: — · Без чека: — · Чеки: —")
+        self.summary_text.setObjectName("summaryValue")
+        self.summary_text.setWordWrap(True)
+        self.summary_text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.summary_text.setMinimumWidth(0)
         self.limit_bar = QProgressBar()
         self.limit_bar.setRange(0, 100)
         self.limit_bar.setValue(0)
@@ -285,11 +295,7 @@ class AnalyticsView(QWidget):
         self.limit_bar.setTextVisible(True)
         self.limit_bar.setFormat("НПД: —")
 
-        layout.addWidget(self.sum_income)
-        layout.addWidget(self.sum_tax)
-        layout.addWidget(self.sum_missing)
-        layout.addWidget(self.sum_checks)
-        layout.addStretch(1)
+        layout.addWidget(self.summary_text, 1)
         layout.addWidget(self.limit_bar)
         return strip
 
@@ -306,20 +312,32 @@ class AnalyticsView(QWidget):
         controls_layout.addWidget(QLabel("Метрика"))
         self.metric_combo = QComboBox()
         self.metric_combo.addItems(["Сумма", "Средний чек"])
+        self.metric_combo.setMinimumContentsLength(7)
+        self.metric_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.metric_combo.setMinimumWidth(90)
         controls_layout.addWidget(self.metric_combo)
         controls_layout.addSpacing(10)
-        controls_layout.addWidget(QLabel("Иерархия"))
+        metric_label = QLabel("Иерархия")
+        controls_layout.addWidget(metric_label)
         self.hierarchy_combo = QComboBox()
         self.hierarchy_combo.addItems(["По источникам", "Источник → день"])
+        self.hierarchy_combo.setMinimumContentsLength(8)
+        self.hierarchy_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.hierarchy_combo.setMinimumWidth(120)
         controls_layout.addWidget(self.hierarchy_combo)
         controls_layout.addSpacing(10)
-        controls_layout.addWidget(QLabel("Мин. сумма источника"))
+        threshold_label = QLabel("Мин. сумма")
+        threshold_label.setToolTip("Минимальная сумма источника для отдельной плитки")
+        controls_layout.addWidget(threshold_label)
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setRange(0, 10_000_000)
         self.threshold_spin.setSingleStep(100)
         self.threshold_spin.setDecimals(0)
         self.threshold_spin.setValue(500)
         self.threshold_spin.setSuffix(" ₽")
+        self.threshold_spin.setMinimumWidth(90)
         controls_layout.addWidget(self.threshold_spin)
         controls_layout.addStretch(1)
         layout.addWidget(controls)
@@ -328,6 +346,8 @@ class AnalyticsView(QWidget):
         layout.addWidget(self.treemap, 1)
         self.treemap_info = QLabel("—")
         self.treemap_info.setObjectName("hint")
+        self.treemap_info.setWordWrap(True)
+        self.treemap_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.treemap_info)
         return block
 
@@ -341,6 +361,8 @@ class AnalyticsView(QWidget):
         layout.setSpacing(0)
         label = QLabel(title)
         label.setObjectName("chartTitle")
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        label.setMinimumWidth(0)
         layout.addWidget(label)
         layout.addWidget(widget, 1)
         return box
@@ -435,6 +457,7 @@ class AnalyticsView(QWidget):
             f"скрыто: {len(hidden)} на {format_rub(hidden_sum)} · "
             f"всего в базе: {len(self._all)}{filter_note}"
         )
+        self.status_label.setToolTip(self.status_label.text())
         self._update_selection_label()
         self._on_table_selection_changed()
         self.dataChanged.emit()
@@ -443,15 +466,21 @@ class AnalyticsView(QWidget):
         summary = receipt_summary(visible, self._statuses)
         tax = tax_estimate_rub(summary["total_rub"], self.settings.tax_rate)
         rate_text = f"{self.settings.tax_rate:g}%"
-        self.sum_income.setText(f"Доход: {format_rub(summary['total_rub'])}")
-        self.sum_tax.setText(f"Налог ({rate_text}): {format_rub(tax)}")
-        self.sum_missing.setText(
-            f"Без чека: {summary['none_count']} на {format_rub(summary['none_rub'])}"
+        queue_note = (
+            f" (в очереди: {summary['queued_count']})" if summary["queued_count"] else ""
         )
-        self.sum_checks.setText(
-            f"Чеки: {summary['sent_count']} / {summary['total_count']} "
-            f"(в очереди: {summary['queued_count']})"
+        text = (
+            f"Доход: {format_rub(summary['total_rub'])}  ·  "
+            f"Налог {rate_text}: {format_rub(tax)}  ·  "
+            f"Без чека: {summary['none_count']} ({format_rub(summary['none_rub'])})  ·  "
+            f"Чеки: {summary['sent_count']}/{summary['total_count']}{queue_note}"
         )
+        self.summary_text.setText(text)
+        self.summary_text.setToolTip(text)
+        year_total = year_total_rub(self._all, current_year())
+        progress = npd_progress(year_total)
+        self.limit_bar.setValue(min(100, int(round(progress))))
+        self.limit_bar.setFormat(f"НПД: {progress:.1f}%")
         year_total = year_total_rub(self._all, current_year())
         progress = npd_progress(year_total)
         self.limit_bar.setValue(min(100, int(round(progress))))
@@ -537,7 +566,8 @@ class AnalyticsView(QWidget):
             if income.external_id in self.state.selected
         )
         self.selection_label.setText(f"Выбрано: {count} на {format_rub(total_kopecks / 100)}")
-        self.transfer_button.setEnabled(count > 0)
+        self.selection_label.setToolTip(self.selection_label.text())
+        self.transfer_action.setEnabled(count > 0)
 
     # ------------------------------------------ прямоугольное выделение
     def _selected_incomes(self) -> list[Income]:
@@ -552,9 +582,9 @@ class AnalyticsView(QWidget):
 
     def _on_table_selection_changed(self, *_args) -> None:
         has_selection = bool(self._selected_incomes())
-        self.mark_selected_button.setEnabled(has_selection)
-        self.unmark_selected_button.setEnabled(has_selection)
-        self.hide_selected_button.setEnabled(has_selection)
+        self.mark_selected_action.setEnabled(has_selection)
+        self.unmark_selected_action.setEnabled(has_selection)
+        self.hide_selected_action.setEnabled(has_selection)
 
     def _mark_selected(self) -> None:
         selected = self._selected_incomes()

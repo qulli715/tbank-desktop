@@ -123,6 +123,13 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 5px; }}
 QMenu {{ background: {bg}; border: 1px solid {border}; color: {text}; }}
+QToolBar {{ background: transparent; border: none; spacing: 4px; }}
+QToolButton {{
+    padding: 6px 12px; border-radius: 6px; background: {button};
+    border: 1px solid {border}; color: {text};
+}}
+QToolButton:hover {{ background: {button_hover}; }}
+QToolButton:disabled {{ color: {muted}; background: {panel}; }}
 QStatusBar {{ color: {muted}; }}
 QToolTip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {border}; }}
 """
